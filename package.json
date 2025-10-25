@@ -1,0 +1,26 @@
+{
+  "name": "indian-stax-multiplayer-backend",
+  "version": "1.0.0",
+  "description": "Multiplayer backend for Indian stock trading game",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "keywords": [
+    "socket.io",
+    "multiplayer",
+    "game",
+    "stock-trading"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "express": "^4.21.2",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
