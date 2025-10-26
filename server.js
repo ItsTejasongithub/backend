@@ -7,14 +7,14 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.FRONTEND_URL || "*", // set your frontend URL in Render
-    methods: ["GET", "POST"]
+    origin: process.env.FRONTEND_URL || "*",
+    methods: ["GET", "POST"],
+    credentials: true
   }
 });
 
-
 // Game configuration - EASILY ADJUSTABLE
-const MONTH_DURATION = parseInt(process.env.MONTH_DURATION || '5000'); // Default: 5 seconds per month
+const MONTH_DURATION = parseInt(process.env.MONTH_DURATION || '5000');
 const TOTAL_MONTHS = 240; // 20 years * 12 months
 const STARTING_CAPITAL = 50000;
 
@@ -27,70 +27,105 @@ function generateRoomCode() {
   return crypto.randomBytes(3).toString('hex').toUpperCase();
 }
 
-function calculateNetWorth(player, currentPrices) {
-  let total = player.pocketCash;
+// FIXED: Better networth calculation with proper price indexing
+function calculateNetWorth(player, room) {
+  let total = player.pocketCash || 0;
   
-  Object.entries(player.portfolio.stocks).forEach(([stockId, stock]) => {
-    const currentPrice = currentPrices[stockId] || 0;
-    total += stock.shares * currentPrice;
+  // Calculate stock portfolio value
+  Object.entries(player.portfolio.stocks || {}).forEach(([stockId, stock]) => {
+    const currentPrice = room.currentPrices[stockId] || 0;
+    total += (stock.shares || 0) * currentPrice;
   });
   
-  total += player.portfolio.savings;
-  total += player.portfolio.mutualFunds;
-  total += player.portfolio.ppf;
+  // Add other investments
+  total += player.portfolio.savings || 0;
+  total += player.portfolio.mutualFunds || 0;
+  total += player.portfolio.ppf || 0;
   
-  player.portfolio.fixedDeposits.forEach(fd => {
-    total += fd.amount + fd.profit;
+  // Add fixed deposits with profit
+  (player.portfolio.fixedDeposits || []).forEach(fd => {
+    total += (fd.amount || 0) + (fd.profit || 0);
   });
   
-  if (player.portfolio.gold.grams > 0 && currentPrices.gold) {
-    total += player.portfolio.gold.grams * currentPrices.gold;
+  // Add gold value
+  if ((player.portfolio.gold?.grams || 0) > 0 && room.currentPrices.gold) {
+    total += player.portfolio.gold.grams * room.currentPrices.gold;
   }
   
   return Math.round(total);
 }
 
+// FIXED: Leaderboard now uses room object for accurate calculation
 function getLeaderboard(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return [];
   
   const leaderboard = Object.values(room.players).map(player => {
-    const netWorth = calculateNetWorth(player, room.currentPrices);
+    const netWorth = calculateNetWorth(player, room);
     const growth = ((netWorth / STARTING_CAPITAL - 1) * 100).toFixed(2);
     
     return {
       id: player.id,
       name: player.name,
       netWorth,
-      pocketCash: player.pocketCash,
+      pocketCash: player.pocketCash || 0,
       growth: parseFloat(growth),
-      portfolioValue: netWorth - player.pocketCash
+      portfolioValue: netWorth - (player.pocketCash || 0)
     };
-  }).sort((a, b) => b.netWorth - a.netWorth);
+  }).sort((a, b) => b.netWorth - a.netWorth); // Sort by networth descending
   
   return leaderboard;
 }
 
+// FIXED: Helper to get current price with proper year indexing
+function getCurrentPrice(stock, gameStartYear, currentMonth) {
+  const yearOffset = Math.floor(currentMonth / 12);
+  const monthInYear = currentMonth % 12;
+  const priceIndex = gameStartYear + yearOffset;
+  const nextPriceIndex = priceIndex + 1;
+  
+  if (stock.prices[priceIndex] !== undefined && stock.prices[nextPriceIndex] !== undefined) {
+    const startPrice = stock.prices[priceIndex];
+    const endPrice = stock.prices[nextPriceIndex];
+    return Math.round(startPrice + (endPrice - startPrice) * (monthInYear / 12));
+  }
+  
+  return stock.prices[priceIndex] || stock.prices[stock.prices.length - 1] || 0;
+}
+
 io.on('connection', (socket) => {
-  console.log(`New client connected: ${socket.id}`);
+  console.log(`✅ New client connected: ${socket.id}`);
   
   socket.on('create-room', (data) => {
     const { playerName, gameData } = data;
     const roomCode = generateRoomCode();
     
+    // Validate gameData
+    if (!gameData || !gameData.stocks || !Array.isArray(gameData.stocks)) {
+      socket.emit('error', { message: 'Invalid game data' });
+      return;
+    }
+    
+    console.log(`🏠 Creating room ${roomCode} with ${gameData.stocks.length} stocks`);
+    
     rooms.set(roomCode, {
       code: roomCode,
       host: socket.id,
       players: {},
-      gameData: gameData,
+      gameData: {
+        stocks: gameData.stocks,
+        gold: gameData.gold || { prices: [] },
+        yearEvents: gameData.yearEvents || {}
+      },
       currentPrices: {},
-      gameStartYear: gameData.gameStartYear,
+      gameStartYear: gameData.gameStartYear || 0,
       currentMonth: 0,
       status: 'waiting',
       startTime: null,
       timer: null,
       events: [],
-      yearEvents: gameData.yearEvents || {}
+      availableInvestments: ['savings'] // ✅ ADD THIS LINE - Start with just savings
+
     });
     
     const player = {
@@ -119,7 +154,7 @@ io.on('connection', (socket) => {
       room: rooms.get(roomCode)
     });
     
-    console.log(`Room ${roomCode} created by ${playerName}`);
+    console.log(`👤 Room ${roomCode} created by ${playerName}`);
   });
   
   socket.on('join-room', (data) => {
@@ -133,6 +168,11 @@ io.on('connection', (socket) => {
     
     if (room.status === 'ended') {
       socket.emit('error', { message: 'Game has already ended' });
+      return;
+    }
+    
+    if (room.status === 'playing') {
+      socket.emit('error', { message: 'Game already in progress' });
       return;
     }
     
@@ -172,7 +212,7 @@ io.on('connection', (socket) => {
       totalPlayers: Object.keys(room.players).length
     });
     
-    console.log(`${playerName} joined room ${roomCode}`);
+    console.log(`👤 ${playerName} joined room ${roomCode}`);
   });
   
   socket.on('start-game', () => {
@@ -189,15 +229,25 @@ io.on('connection', (socket) => {
       return;
     }
     
+    if (Object.keys(room.players).length < 2) {
+      socket.emit('error', { message: 'Need at least 2 players to start' });
+      return;
+    }
+    
     room.status = 'playing';
     room.startTime = Date.now();
+    room.currentMonth = 0;
     
-    // Initialize current prices
+    // Initialize current prices using the helper function
     room.gameData.stocks.forEach(stock => {
-      const actualYear = room.gameStartYear;
-      room.currentPrices[stock.id] = stock.prices[actualYear];
+      room.currentPrices[stock.id] = getCurrentPrice(stock, room.gameStartYear, 0);
     });
-    room.currentPrices.gold = room.gameData.gold.prices[room.gameStartYear];
+    
+    // Initialize gold price
+    if (room.gameData.gold && room.gameData.gold.prices) {
+      const goldPriceIndex = room.gameStartYear;
+      room.currentPrices.gold = room.gameData.gold.prices[goldPriceIndex] || 350;
+    }
     
     startMonthTimer(roomCode);
     
@@ -208,10 +258,11 @@ io.on('connection', (socket) => {
       duration: TOTAL_MONTHS * MONTH_DURATION,
       currentPrices: room.currentPrices,
       leaderboard: initialLeaderboard,
-      monthDuration: MONTH_DURATION
+      monthDuration: MONTH_DURATION,
+      availableInvestments: room.availableInvestments // ✅ ADD THIS LINE
     });
     
-    console.log(`Game started in room ${roomCode} - ${MONTH_DURATION}ms per month`);
+    console.log(`🎮 Game started in room ${roomCode} - ${Object.keys(room.players).length} players`);
   });
   
   socket.on('update-networth', (data) => {
@@ -224,9 +275,10 @@ io.on('connection', (socket) => {
     const player = room.players[socket.id];
     if (!player) return;
     
-    player.cachedNetWorth = netWorth;
+    // Update player cash (client is source of truth for their own cash)
     player.pocketCash = cash;
     
+    // Recalculate leaderboard with current prices
     const leaderboard = getLeaderboard(roomCode);
     
     io.to(roomCode).emit('leaderboard-update', {
@@ -271,8 +323,9 @@ io.on('connection', (socket) => {
     }
     
     const stock = player.portfolio.stocks[stockId];
-    stock.avgPrice = (stock.avgPrice * stock.shares + cost) / (stock.shares + shares);
-    stock.shares += shares;
+    const totalShares = stock.shares + shares;
+    stock.avgPrice = (stock.avgPrice * stock.shares + cost) / totalShares;
+    stock.shares = totalShares;
     
     room.events.push({
       type: 'buy',
@@ -290,9 +343,11 @@ io.on('connection', (socket) => {
       stockId,
       shares,
       price: currentPrice,
-      pocketCash: player.pocketCash
+      pocketCash: player.pocketCash,
+      portfolio: player.portfolio.stocks  // ✅ ADD: Send updated portfolio
     });
     
+    // Broadcast updated leaderboard
     io.to(roomCode).emit('leaderboard-update', {
       leaderboard: getLeaderboard(roomCode),
       currentMonth: room.currentMonth
@@ -344,7 +399,8 @@ io.on('connection', (socket) => {
       stockId,
       shares,
       price: currentPrice,
-      pocketCash: player.pocketCash
+      pocketCash: player.pocketCash,
+      portfolio: player.portfolio.stocks  // ✅ ADD: Send updated portfolio
     });
     
     io.to(roomCode).emit('leaderboard-update', {
@@ -389,7 +445,7 @@ io.on('connection', (socket) => {
     if (!room || room.status !== 'playing') return;
     
     const player = room.players[socket.id];
-    const goldPrice = room.currentPrices.gold;
+    const goldPrice = room.currentPrices.gold || 0;
     const cost = goldPrice * grams;
     
     if (!player || player.pocketCash < cost) {
@@ -438,21 +494,26 @@ io.on('connection', (socket) => {
     const player = room.players[socket.id];
     if (!player) return;
     
+    console.log(`👋 ${player.name} disconnected from room ${roomCode}`);
+    
     delete room.players[socket.id];
     
+    // Handle host reassignment
     if (room.host === socket.id) {
       const remainingPlayers = Object.keys(room.players);
       if (remainingPlayers.length > 0) {
         room.host = remainingPlayers[0];
         room.players[room.host].isHost = true;
         io.to(roomCode).emit('new-host', { hostId: room.host });
+        console.log(`👑 New host in room ${roomCode}: ${room.players[room.host].name}`);
       }
     }
     
+    // Delete room if empty
     if (Object.keys(room.players).length === 0) {
       if (room.timer) clearInterval(room.timer);
       rooms.delete(roomCode);
-      console.log(`Room ${roomCode} deleted (empty)`);
+      console.log(`🗑️  Room ${roomCode} deleted (empty)`);
     } else {
       io.to(roomCode).emit('player-left', {
         playerId: socket.id,
@@ -465,17 +526,15 @@ io.on('connection', (socket) => {
         currentMonth: room.currentMonth
       });
     }
-    
-    console.log(`Player ${socket.id} disconnected from room ${roomCode}`);
   });
 });
 
-// Month progression timer
+// Month progression timer - FIXED for proper price updates
 function startMonthTimer(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
   
-  console.log(`Starting month timer for room ${roomCode} - ${MONTH_DURATION}ms intervals`);
+  console.log(`⏰ Starting month timer for room ${roomCode}`);
   
   room.timer = setInterval(() => {
     if (room.status !== 'playing') {
@@ -487,35 +546,28 @@ function startMonthTimer(roomCode) {
     const currentYear = Math.floor(room.currentMonth / 12);
     const monthInYear = room.currentMonth % 12;
     
-    console.log(`Room ${roomCode} - Month ${room.currentMonth} (Year ${currentYear}, Month ${monthInYear})`);
-    
-    // Update prices based on current year
+    // Update stock prices
     room.gameData.stocks.forEach(stock => {
-      const actualYear = room.gameStartYear + currentYear;
-      const nextYear = room.gameStartYear + currentYear + 1;
-      
-      if (stock.prices[actualYear] !== undefined && stock.prices[nextYear] !== undefined) {
-        // Interpolate price between years
-        const startPrice = stock.prices[actualYear];
-        const endPrice = stock.prices[nextYear];
-        const interpolatedPrice = startPrice + (endPrice - startPrice) * (monthInYear / 12);
-        room.currentPrices[stock.id] = Math.round(interpolatedPrice);
-      } else {
-        room.currentPrices[stock.id] = stock.prices[actualYear] || stock.prices[stock.prices.length - 1];
-      }
+      room.currentPrices[stock.id] = getCurrentPrice(stock, room.gameStartYear, room.currentMonth);
     });
     
-    const actualYear = room.gameStartYear + currentYear;
-    const nextYear = room.gameStartYear + currentYear + 1;
-    if (room.gameData.gold.prices[actualYear] !== undefined && room.gameData.gold.prices[nextYear] !== undefined) {
-      const startPrice = room.gameData.gold.prices[actualYear];
-      const endPrice = room.gameData.gold.prices[nextYear];
-      room.currentPrices.gold = Math.round(startPrice + (endPrice - startPrice) * (monthInYear / 12));
-    } else {
-      room.currentPrices.gold = room.gameData.gold.prices[actualYear] || room.gameData.gold.prices[room.gameData.gold.prices.length - 1];
+    // Update gold price
+    if (room.gameData.gold && room.gameData.gold.prices) {
+      const yearOffset = Math.floor(room.currentMonth / 12);
+      const monthInYearLocal = room.currentMonth % 12;
+      const priceIndex = room.gameStartYear + yearOffset;
+      const nextPriceIndex = priceIndex + 1;
+      
+      if (room.gameData.gold.prices[priceIndex] && room.gameData.gold.prices[nextPriceIndex]) {
+        const startPrice = room.gameData.gold.prices[priceIndex];
+        const endPrice = room.gameData.gold.prices[nextPriceIndex];
+        room.currentPrices.gold = Math.round(startPrice + (endPrice - startPrice) * (monthInYearLocal / 12));
+      } else {
+        room.currentPrices.gold = room.gameData.gold.prices[priceIndex] || 350;
+      }
     }
     
-    // Apply monthly returns to investments
+    // Apply monthly returns to all players
     Object.values(room.players).forEach(player => {
       player.portfolio.savings *= (1 + 4 / 100 / 12);
       player.portfolio.mutualFunds *= (1 + 12 / 100 / 12);
@@ -528,17 +580,24 @@ function startMonthTimer(roomCode) {
       }));
     });
     
-    // Check for yearly events (at month 0 of each year)
-    if (monthInYear === 0) {
-      const yearEvent = room.yearEvents[currentYear];
-      if (yearEvent) {
-        io.to(roomCode).emit('year-event', {
-          year: currentYear,
-          month: room.currentMonth,
-          event: yearEvent
-        });
-      }
+// Check for yearly events
+if (monthInYear === 0 && room.gameData.yearEvents) {
+  const yearEvent = room.gameData.yearEvents[currentYear];
+  if (yearEvent) {
+    // ✅ ADD: Unlock investments on server side
+    if (yearEvent.unlock && !room.availableInvestments.includes(yearEvent.unlock)) {
+      room.availableInvestments.push(yearEvent.unlock);
+      console.log(`🔓 Room ${roomCode} - Unlocked: ${yearEvent.unlock}`);
     }
+    
+    io.to(roomCode).emit('year-event', {
+      year: currentYear,
+      month: room.currentMonth,
+      event: yearEvent,
+      availableInvestments: room.availableInvestments // ✅ ADD: Send updated list
+    });
+  }
+}
     
     // Broadcast month update with leaderboard
     const leaderboard = getLeaderboard(roomCode);
@@ -548,10 +607,15 @@ function startMonthTimer(roomCode) {
       currentYear: currentYear,
       monthInYear: monthInYear,
       currentPrices: room.currentPrices,
-      leaderboard: leaderboard
+      leaderboard: leaderboard,
+      availableInvestments: room.availableInvestments // ✅ ADD THIS LINE
     });
     
-    // End game after 240 months (20 years)
+    if (room.currentMonth % 12 === 0) {
+      console.log(`📅 Room ${roomCode} - Year ${currentYear} complete`);
+    }
+    
+    // End game after 240 months
     if (room.currentMonth >= TOTAL_MONTHS) {
       endGame(roomCode);
     }
@@ -573,36 +637,50 @@ function endGame(roomCode) {
     duration: Date.now() - room.startTime
   });
   
-  console.log(`Game ended in room ${roomCode}`);
+  console.log(`🏁 Game ended in room ${roomCode}`);
+  console.log(`🏆 Winner: ${finalLeaderboard[0]?.name} with ${finalLeaderboard[0]?.netWorth}`);
   
+  // Cleanup after 5 minutes
   setTimeout(() => {
     rooms.delete(roomCode);
-    console.log(`Room ${roomCode} cleaned up`);
+    console.log(`🗑️  Room ${roomCode} cleaned up`);
   }, 5 * 60 * 1000);
 }
 
+// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
     activeRooms: rooms.size,
     monthDuration: `${MONTH_DURATION}ms`,
     yearDuration: `${MONTH_DURATION * 12 / 1000}s`,
+    totalMonths: TOTAL_MONTHS,
     rooms: Array.from(rooms.values()).map(room => ({
       code: room.code,
       players: Object.keys(room.players).length,
       status: room.status,
       currentMonth: room.currentMonth,
-      currentYear: Math.floor(room.currentMonth / 12)
+      currentYear: Math.floor(room.currentMonth / 12),
+      stocks: room.gameData?.stocks?.length || 0
     }))
   });
 });
 
-const PORT = process.env.PORT || 3000; // Render assigns PORT automatically
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    message: 'Build Your Dhan - Multiplayer Server',
+    version: '2.0',
+    activeGames: rooms.size
+  });
+});
+
+const PORT = process.env.PORT || 3000;
 
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  console.log(`📱 Share this URL with your frontend: https://your-render-app.onrender.com`);
+  console.log(`📊 Month duration: ${MONTH_DURATION}ms`);
+  console.log(`🎮 Ready for multiplayer games!`);
 });
-
 
 module.exports = { app, io };
