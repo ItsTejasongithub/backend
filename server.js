@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const crypto = require('crypto');
+require('dotenv').config();
 
 const app = express();
 const server = http.createServer(app);
@@ -13,71 +14,44 @@ const io = socketIo(server, {
   }
 });
 
-// Game configuration - EASILY ADJUSTABLE
 const MONTH_DURATION = parseInt(process.env.MONTH_DURATION || '5000');
-const TOTAL_MONTHS = 240; // 20 years * 12 months
+const TOTAL_MONTHS = 240;
 const STARTING_CAPITAL = 50000;
 
-console.log(`⚙️  Game Speed: ${MONTH_DURATION}ms per month (${MONTH_DURATION * 12 / 1000}s per year)`);
+console.log("ENV VALUE:", process.env.MONTH_DURATION);
+console.log("URL:", process.env.FRONTEND_URL);
+console.log(`⚙️ Game Speed: ${MONTH_DURATION}ms per month (${MONTH_DURATION * 12 / 1000}s per year)`);
+console.log(`port: ${process.env.PORT}`);
 
-// In-memory storage for rooms
+
 const rooms = new Map();
 
 function generateRoomCode() {
   return crypto.randomBytes(3).toString('hex').toUpperCase();
 }
 
-// FIXED: Better networth calculation with proper price indexing
-function calculateNetWorth(player, room) {
-  let total = player.pocketCash || 0;
-  
-  // Calculate stock portfolio value
-  Object.entries(player.portfolio.stocks || {}).forEach(([stockId, stock]) => {
-    const currentPrice = room.currentPrices[stockId] || 0;
-    total += (stock.shares || 0) * currentPrice;
-  });
-  
-  // Add other investments
-  total += player.portfolio.savings || 0;
-  total += player.portfolio.mutualFunds || 0;
-  total += player.portfolio.ppf || 0;
-  
-  // Add fixed deposits with profit
-  (player.portfolio.fixedDeposits || []).forEach(fd => {
-    total += (fd.amount || 0) + (fd.profit || 0);
-  });
-  
-  // Add gold value
-  if ((player.portfolio.gold?.grams || 0) > 0 && room.currentPrices.gold) {
-    total += player.portfolio.gold.grams * room.currentPrices.gold;
-  }
-  
-  return Math.round(total);
-}
-
-// FIXED: Leaderboard now uses room object for accurate calculation
+// ✅ FIX #1: SIMPLIFIED LEADERBOARD - Just use client-reported networth
 function getLeaderboard(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return [];
   
   const leaderboard = Object.values(room.players).map(player => {
-    const netWorth = calculateNetWorth(player, room);
+    // Use client's self-reported networth (they calculate it accurately)
+    const netWorth = player.netWorth || STARTING_CAPITAL;
     const growth = ((netWorth / STARTING_CAPITAL - 1) * 100).toFixed(2);
     
     return {
       id: player.id,
       name: player.name,
-      netWorth,
+      netWorth: netWorth,
       pocketCash: player.pocketCash || 0,
-      growth: parseFloat(growth),
-      portfolioValue: netWorth - (player.pocketCash || 0)
+      growth: parseFloat(growth)
     };
-  }).sort((a, b) => b.netWorth - a.netWorth); // Sort by networth descending
+  }).sort((a, b) => b.netWorth - a.netWorth);
   
   return leaderboard;
 }
 
-// FIXED: Helper to get current price with proper year indexing
 function getCurrentPrice(stock, gameStartYear, currentMonth) {
   const yearOffset = Math.floor(currentMonth / 12);
   const monthInYear = currentMonth % 12;
@@ -100,7 +74,6 @@ io.on('connection', (socket) => {
     const { playerName, gameData } = data;
     const roomCode = generateRoomCode();
     
-    // Validate gameData
     if (!gameData || !gameData.stocks || !Array.isArray(gameData.stocks)) {
       socket.emit('error', { message: 'Invalid game data' });
       return;
@@ -124,8 +97,7 @@ io.on('connection', (socket) => {
       startTime: null,
       timer: null,
       events: [],
-      availableInvestments: ['savings'] // ✅ ADD THIS LINE - Start with just savings
-
+      availableInvestments: ['savings']
     });
     
     const player = {
@@ -133,6 +105,7 @@ io.on('connection', (socket) => {
       name: playerName,
       isHost: true,
       pocketCash: STARTING_CAPITAL,
+      netWorth: STARTING_CAPITAL, // ✅ ADD: Track networth
       portfolio: {
         savings: 0,
         fixedDeposits: [],
@@ -186,6 +159,7 @@ io.on('connection', (socket) => {
       name: playerName,
       isHost: false,
       pocketCash: STARTING_CAPITAL,
+      netWorth: STARTING_CAPITAL, // ✅ ADD: Track networth
       portfolio: {
         savings: 0,
         fixedDeposits: [],
@@ -238,12 +212,11 @@ io.on('connection', (socket) => {
     room.startTime = Date.now();
     room.currentMonth = 0;
     
-    // Initialize current prices using the helper function
+    // Initialize current prices
     room.gameData.stocks.forEach(stock => {
       room.currentPrices[stock.id] = getCurrentPrice(stock, room.gameStartYear, 0);
     });
     
-    // Initialize gold price
     if (room.gameData.gold && room.gameData.gold.prices) {
       const goldPriceIndex = room.gameStartYear;
       room.currentPrices.gold = room.gameData.gold.prices[goldPriceIndex] || 350;
@@ -259,14 +232,15 @@ io.on('connection', (socket) => {
       currentPrices: room.currentPrices,
       leaderboard: initialLeaderboard,
       monthDuration: MONTH_DURATION,
-      availableInvestments: room.availableInvestments // ✅ ADD THIS LINE
+      availableInvestments: room.availableInvestments
     });
     
     console.log(`🎮 Game started in room ${roomCode} - ${Object.keys(room.players).length} players`);
   });
   
+  // ✅ FIX #2: Simplified networth update - just store what client sends
   socket.on('update-networth', (data) => {
-    const { netWorth, cash, portfolioValue } = data;
+    const { netWorth, cash } = data;
     const roomCode = socket.roomCode;
     const room = rooms.get(roomCode);
     
@@ -275,10 +249,11 @@ io.on('connection', (socket) => {
     const player = room.players[socket.id];
     if (!player) return;
     
-    // Update player cash (client is source of truth for their own cash)
+    // Store client's self-calculated networth
+    player.netWorth = netWorth;
     player.pocketCash = cash;
     
-    // Recalculate leaderboard with current prices
+    // Update leaderboard
     const leaderboard = getLeaderboard(roomCode);
     
     io.to(roomCode).emit('leaderboard-update', {
@@ -344,10 +319,9 @@ io.on('connection', (socket) => {
       shares,
       price: currentPrice,
       pocketCash: player.pocketCash,
-      portfolio: player.portfolio.stocks  // ✅ ADD: Send updated portfolio
+      portfolio: player.portfolio.stocks
     });
     
-    // Broadcast updated leaderboard
     io.to(roomCode).emit('leaderboard-update', {
       leaderboard: getLeaderboard(roomCode),
       currentMonth: room.currentMonth
@@ -400,87 +374,12 @@ io.on('connection', (socket) => {
       shares,
       price: currentPrice,
       pocketCash: player.pocketCash,
-      portfolio: player.portfolio.stocks  // ✅ ADD: Send updated portfolio
+      portfolio: player.portfolio.stocks
     });
     
     io.to(roomCode).emit('leaderboard-update', {
       leaderboard: getLeaderboard(roomCode),
       currentMonth: room.currentMonth
-    });
-  });
-  
-  socket.on('invest-savings', (data) => {
-    const { amount } = data;
-    const roomCode = socket.roomCode;
-    const room = rooms.get(roomCode);
-    
-    if (!room || room.status !== 'playing') return;
-    
-    const player = room.players[socket.id];
-    if (!player || player.pocketCash < amount) {
-      socket.emit('error', { message: 'Insufficient funds' });
-      return;
-    }
-    
-    player.pocketCash -= amount;
-    player.portfolio.savings += amount;
-    
-    socket.emit('investment-success', {
-      type: 'savings',
-      amount,
-      pocketCash: player.pocketCash
-    });
-    
-    io.to(roomCode).emit('leaderboard-update', {
-      leaderboard: getLeaderboard(roomCode),
-      currentMonth: room.currentMonth
-    });
-  });
-  
-  socket.on('buy-gold', (data) => {
-    const { grams } = data;
-    const roomCode = socket.roomCode;
-    const room = rooms.get(roomCode);
-    
-    if (!room || room.status !== 'playing') return;
-    
-    const player = room.players[socket.id];
-    const goldPrice = room.currentPrices.gold || 0;
-    const cost = goldPrice * grams;
-    
-    if (!player || player.pocketCash < cost) {
-      socket.emit('error', { message: 'Insufficient funds' });
-      return;
-    }
-    
-    player.pocketCash -= cost;
-    player.portfolio.gold.grams += grams;
-    
-    socket.emit('investment-success', {
-      type: 'gold',
-      grams,
-      price: goldPrice,
-      pocketCash: player.pocketCash
-    });
-    
-    io.to(roomCode).emit('leaderboard-update', {
-      leaderboard: getLeaderboard(roomCode),
-      currentMonth: room.currentMonth
-    });
-  });
-  
-  socket.on('get-room-info', () => {
-    const roomCode = socket.roomCode;
-    const room = rooms.get(roomCode);
-    
-    if (!room) {
-      socket.emit('error', { message: 'Room not found' });
-      return;
-    }
-    
-    socket.emit('room-info', {
-      room,
-      leaderboard: getLeaderboard(roomCode)
     });
   });
   
@@ -498,7 +397,6 @@ io.on('connection', (socket) => {
     
     delete room.players[socket.id];
     
-    // Handle host reassignment
     if (room.host === socket.id) {
       const remainingPlayers = Object.keys(room.players);
       if (remainingPlayers.length > 0) {
@@ -509,11 +407,10 @@ io.on('connection', (socket) => {
       }
     }
     
-    // Delete room if empty
     if (Object.keys(room.players).length === 0) {
       if (room.timer) clearInterval(room.timer);
       rooms.delete(roomCode);
-      console.log(`🗑️  Room ${roomCode} deleted (empty)`);
+      console.log(`🗑️ Room ${roomCode} deleted (empty)`);
     } else {
       io.to(roomCode).emit('player-left', {
         playerId: socket.id,
@@ -529,7 +426,7 @@ io.on('connection', (socket) => {
   });
 });
 
-// Month progression timer - FIXED for proper price updates
+// ✅ FIX #3: Server controls ALL time progression
 function startMonthTimer(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
@@ -567,39 +464,25 @@ function startMonthTimer(roomCode) {
       }
     }
     
-    // Apply monthly returns to all players
-    Object.values(room.players).forEach(player => {
-      player.portfolio.savings *= (1 + 4 / 100 / 12);
-      player.portfolio.mutualFunds *= (1 + 12 / 100 / 12);
-      player.portfolio.ppf *= (1 + 7.1 / 100 / 12);
-      
-      player.portfolio.fixedDeposits = player.portfolio.fixedDeposits.map(fd => ({
-        ...fd,
-        monthsElapsed: fd.monthsElapsed + 1,
-        profit: fd.amount * (fd.roi / 100) * (fd.monthsElapsed + 1) / fd.duration
-      }));
-    });
-    
-// Check for yearly events
-if (monthInYear === 0 && room.gameData.yearEvents) {
-  const yearEvent = room.gameData.yearEvents[currentYear];
-  if (yearEvent) {
-    // ✅ ADD: Unlock investments on server side
-    if (yearEvent.unlock && !room.availableInvestments.includes(yearEvent.unlock)) {
-      room.availableInvestments.push(yearEvent.unlock);
-      console.log(`🔓 Room ${roomCode} - Unlocked: ${yearEvent.unlock}`);
+    // Check for yearly events and unlock investments
+    if (monthInYear === 0 && room.gameData.yearEvents) {
+      const yearEvent = room.gameData.yearEvents[currentYear];
+      if (yearEvent) {
+        if (yearEvent.unlock && !room.availableInvestments.includes(yearEvent.unlock)) {
+          room.availableInvestments.push(yearEvent.unlock);
+          console.log(`🔓 Room ${roomCode} - Unlocked: ${yearEvent.unlock}`);
+        }
+        
+        io.to(roomCode).emit('year-event', {
+          year: currentYear,
+          month: room.currentMonth,
+          event: yearEvent,
+          availableInvestments: room.availableInvestments
+        });
+      }
     }
     
-    io.to(roomCode).emit('year-event', {
-      year: currentYear,
-      month: room.currentMonth,
-      event: yearEvent,
-      availableInvestments: room.availableInvestments // ✅ ADD: Send updated list
-    });
-  }
-}
-    
-    // Broadcast month update with leaderboard
+    // Broadcast month update with current time
     const leaderboard = getLeaderboard(roomCode);
     
     io.to(roomCode).emit('month-update', {
@@ -608,14 +491,13 @@ if (monthInYear === 0 && room.gameData.yearEvents) {
       monthInYear: monthInYear,
       currentPrices: room.currentPrices,
       leaderboard: leaderboard,
-      availableInvestments: room.availableInvestments // ✅ ADD THIS LINE
+      availableInvestments: room.availableInvestments
     });
     
     if (room.currentMonth % 12 === 0) {
       console.log(`📅 Room ${roomCode} - Year ${currentYear} complete`);
     }
     
-    // End game after 240 months
     if (room.currentMonth >= TOTAL_MONTHS) {
       endGame(roomCode);
     }
@@ -638,16 +520,14 @@ function endGame(roomCode) {
   });
   
   console.log(`🏁 Game ended in room ${roomCode}`);
-  console.log(`🏆 Winner: ${finalLeaderboard[0]?.name} with ${finalLeaderboard[0]?.netWorth}`);
+  console.log(`🏆 Winner: ${finalLeaderboard[0]?.name} with ₹${finalLeaderboard[0]?.netWorth}`);
   
-  // Cleanup after 5 minutes
   setTimeout(() => {
     rooms.delete(roomCode);
-    console.log(`🗑️  Room ${roomCode} cleaned up`);
+    console.log(`🗑️ Room ${roomCode} cleaned up`);
   }, 5 * 60 * 1000);
 }
 
-// Health check endpoint
 app.get('/health', (req, res) => {
   res.json({
     status: 'ok',
@@ -661,12 +541,12 @@ app.get('/health', (req, res) => {
       status: room.status,
       currentMonth: room.currentMonth,
       currentYear: Math.floor(room.currentMonth / 12),
-      stocks: room.gameData?.stocks?.length || 0
+      stocks: room.gameData?.stocks?.length || 0,
+      availableInvestments: room.availableInvestments
     }))
   });
 });
 
-// Root endpoint
 app.get('/', (req, res) => {
   res.json({
     message: 'Build Your Dhan - Multiplayer Server',
