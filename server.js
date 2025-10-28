@@ -67,6 +67,99 @@ function getCurrentPrice(stock, gameStartYear, currentMonth) {
   return stock.prices[priceIndex] || stock.prices[stock.prices.length - 1] || 0;
 }
 
+function generateRandomEvents() {
+  const EVENT_POOL = {
+    losses: [
+    { message: 'House robbery during Diwali', amount: -15000 },
+    { message: 'Family medical emergency', amount: -30000 },
+    { message: 'Vehicle repair after monsoon', amount: -20000 },
+    { message: 'Wedding shopping expenses', amount: -15000 },
+    { message: 'Health insurance deductible', amount: -25000 },
+    { message: 'Home repairs after flooding', amount: -45000 },
+    { message: 'Laptop suddenly stopped working', amount: -50000 },
+    { message: 'Legal fees for property dispute', amount: -35000 },
+    { message: 'AC breakdown in peak summer', amount: -18000 },
+    { message: 'Parent hospitalization costs', amount: -40000 },
+    { message: 'Car accident - insurance excess', amount: -22000 },
+    { message: 'Stolen mobile phone', amount: -12000 },
+    { message: 'Urgent home appliance replacement', amount: -28000 },
+    { message: 'Child school fees increase', amount: -15000 },
+    { message: 'Unexpected tax liability', amount: -35000 },
+    { message: 'Emergency dental treatment', amount: -18000 },
+    { message: 'Bike accident repair', amount: -14000 },
+    { message: 'Flooding damaged furniture', amount: -25000 },
+    { message: 'Friend wedding gift expected', amount: -10000 },
+    { message: 'Pet medical emergency', amount: -20000 }
+  ],
+  gains: [
+    { message: 'Won Kerala lottery!', amount: 25000 },
+    { message: 'Diwali bonus from company', amount: 50000 },
+    { message: 'Freelance project bonus', amount: 40000 },
+    { message: 'Side business profit', amount: 35000 },
+    { message: 'Performance bonus at work', amount: 45000 },
+    { message: 'Tax refund received', amount: 20000 },
+    { message: 'Sold old items online', amount: 15000 },
+    { message: 'Investment dividend received', amount: 30000 }
+  ],
+  unlocks: [
+    { message: 'Fixed Deposits now available', unlock: 'fixedDeposits', year: 1 },
+    { message: 'Mutual Funds now available', unlock: 'mutualFunds', year: 2 },
+    { message: 'Stock market access unlocked', unlock: 'stocks', year: 3 },
+    { message: 'Gold investment available', unlock: 'gold', year: 10 },
+    { message: 'PPF account opened', unlock: 'ppf', year: 15 }
+  ]
+  };
+
+  // Copy the entire generateRandomEvents logic from Game.jsx
+  const events = {};
+  const usedLossEvents = new Set();
+  const usedGainEvents = new Set();
+  
+  EVENT_POOL.unlocks.forEach(unlock => {
+    events[unlock.year] = { type: 'unlock', message: unlock.message, unlock: unlock.unlock };
+  });
+  
+  let nextEventMonth = Math.floor(Math.random() * 12) + 24;
+  
+  while (nextEventMonth < 240) {
+    const eventYear = Math.floor(nextEventMonth / 12);
+    
+    if (!events[eventYear]) {
+      const isLoss = Math.random() < 0.6;
+      
+      if (isLoss) {
+        let eventIndex;
+        let attempts = 0;
+        do {
+          eventIndex = Math.floor(Math.random() * EVENT_POOL.losses.length);
+          attempts++;
+        } while (usedLossEvents.has(eventIndex) && attempts < 20);
+        
+        usedLossEvents.add(eventIndex);
+        const lossEvent = EVENT_POOL.losses[eventIndex];
+        events[eventYear] = { type: 'loss', message: lossEvent.message, amount: lossEvent.amount };
+      } else {
+        let eventIndex;
+        let attempts = 0;
+        do {
+          eventIndex = Math.floor(Math.random() * EVENT_POOL.gains.length);
+          attempts++;
+        } while (usedGainEvents.has(eventIndex) && attempts < 20);
+        
+        usedGainEvents.add(eventIndex);
+        const gainEvent = EVENT_POOL.gains[eventIndex];
+        events[eventYear] = { type: 'gain', message: gainEvent.message, amount: gainEvent.amount };
+      }
+    }
+    
+    nextEventMonth += Math.floor(Math.random() * 13) + 24;
+  }
+  
+  return events;
+}
+
+
+
 io.on('connection', (socket) => {
   console.log(`✅ New client connected: ${socket.id}`);
   
@@ -88,7 +181,7 @@ io.on('connection', (socket) => {
       gameData: {
         stocks: gameData.stocks,
         gold: gameData.gold || { prices: [] },
-        yearEvents: gameData.yearEvents || {}
+        
       },
       currentPrices: {},
       gameStartYear: gameData.gameStartYear || 0,
@@ -209,6 +302,9 @@ io.on('connection', (socket) => {
     }
     
     room.status = 'playing';
+    Object.keys(room.players).forEach(playerId => {
+      room.players[playerId].yearEvents = generateRandomEvents();
+    });
     room.startTime = Date.now();
     room.currentMonth = 0;
     
@@ -465,21 +561,25 @@ function startMonthTimer(roomCode) {
     }
     
     // Check for yearly events and unlock investments
-    if (monthInYear === 0 && room.gameData.yearEvents) {
-      const yearEvent = room.gameData.yearEvents[currentYear];
-      if (yearEvent) {
-        if (yearEvent.unlock && !room.availableInvestments.includes(yearEvent.unlock)) {
-          room.availableInvestments.push(yearEvent.unlock);
-          console.log(`🔓 Room ${roomCode} - Unlocked: ${yearEvent.unlock}`);
-        }
+    if (monthInYear === 0 && currentYear > 0) {
+      Object.keys(room.players).forEach(playerId => {
+        const player = room.players[playerId];
+        const yearEvent = player.yearEvents?.[currentYear];
         
-        io.to(roomCode).emit('year-event', {
-          year: currentYear,
-          month: room.currentMonth,
-          event: yearEvent,
-          availableInvestments: room.availableInvestments
-        });
-      }
+        if (yearEvent) {
+          if (yearEvent.unlock && !room.availableInvestments.includes(yearEvent.unlock)) {
+            room.availableInvestments.push(yearEvent.unlock);
+          }
+          
+          // Send event to ONLY this player
+          io.to(playerId).emit('year-event', {
+            year: currentYear,
+            month: room.currentMonth,
+            event: yearEvent,
+            availableInvestments: room.availableInvestments
+          });
+        }
+      });
     }
     
     // Broadcast month update with current time
