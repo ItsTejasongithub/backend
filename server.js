@@ -69,6 +69,11 @@ function getCurrentPrice(asset, gameStartYear, currentMonth) {
     nextPriceIndex = priceIndex + 1;
   }
 
+  // Clamp to available range to avoid OOB when game extends beyond data
+  if (priceIndex < 0) priceIndex = 0;
+  if (priceIndex >= asset.prices.length) priceIndex = asset.prices.length - 1;
+  nextPriceIndex = priceIndex + 1;
+
   if (asset.prices[priceIndex] !== undefined && asset.prices[nextPriceIndex] !== undefined) {
     const startPrice = asset.prices[priceIndex];
     const endPrice = asset.prices[nextPriceIndex];
@@ -76,6 +81,141 @@ function getCurrentPrice(asset, gameStartYear, currentMonth) {
   }
 
   return asset.prices[priceIndex] || asset.prices[asset.prices.length - 1] || 0;
+}
+
+// Timeline-based unlock generation with overlap checks (mirrors frontend)
+function generateTimelineEventsServer(gameData, gameStartYear, gameEndYear) {
+  const events = {};
+
+  // Fixed unlocks: savings (0), fixed deposits (1)
+  events[0] = { type: 'unlock', message: 'Savings Account ready', unlock: 'savings' };
+  events[1] = { type: 'unlock', message: 'Fixed Deposits now available', unlock: 'fixedDeposits' };
+
+  const categoryUnlocks = [];
+
+  // Stocks
+  if (Array.isArray(gameData.stocks) && gameData.stocks.length > 0) {
+    const overlap = gameData.stocks.filter(s => s.endYear >= gameStartYear && s.startYear <= gameEndYear);
+    if (overlap.length > 0) {
+      const earliestYear = Math.min(...overlap.map(s => s.startYear));
+      categoryUnlocks.push({ category: 'stocks', name: 'Stock Market', unlockYear: earliestYear, message: 'Stock market access unlocked' });
+    }
+  }
+
+  // Gold
+  if (gameData.gold && gameData.gold.startYear && gameData.gold.endYear >= gameStartYear && gameData.gold.startYear <= gameEndYear) {
+    categoryUnlocks.push({ category: 'gold', name: 'Gold', unlockYear: gameData.gold.startYear, message: 'Gold investment unlocked' });
+  }
+
+  // Mutual Funds
+  if (Array.isArray(gameData.mutualFunds) && gameData.mutualFunds.length > 0) {
+    const overlap = gameData.mutualFunds.filter(m => m.endYear >= gameStartYear && m.startYear <= gameEndYear);
+    if (overlap.length > 0) {
+      const earliestYear = Math.min(...overlap.map(m => m.startYear));
+      categoryUnlocks.push({ category: 'mutualFunds', name: 'Mutual Funds', unlockYear: earliestYear, message: 'Mutual Funds now available' });
+    }
+  }
+
+  // Index Funds
+  if (Array.isArray(gameData.indexFunds) && gameData.indexFunds.length > 0) {
+    const overlap = gameData.indexFunds.filter(i => i.endYear >= gameStartYear && i.startYear <= gameEndYear);
+    if (overlap.length > 0) {
+      const earliestYear = Math.min(...overlap.map(i => i.startYear));
+      categoryUnlocks.push({ category: 'indexFunds', name: 'Index Funds', unlockYear: earliestYear, message: 'Index Funds now available' });
+    }
+  }
+
+  // Commodities
+  if (Array.isArray(gameData.commodities) && gameData.commodities.length > 0) {
+    const overlap = gameData.commodities.filter(c => c.endYear >= gameStartYear && c.startYear <= gameEndYear);
+    if (overlap.length > 0) {
+      const earliestYear = Math.min(...overlap.map(c => c.startYear));
+      categoryUnlocks.push({ category: 'commodities', name: 'Commodities', unlockYear: earliestYear, message: 'Commodity trading unlocked' });
+    }
+  }
+
+  // Crypto (progressive BTC then ETH)
+  if (Array.isArray(gameData.crypto) && gameData.crypto.length > 0) {
+    const btc = gameData.crypto.find(c => c.id === 'BTC');
+    if (btc && btc.startYear && btc.endYear >= gameStartYear && btc.startYear <= gameEndYear) {
+      categoryUnlocks.push({ category: 'crypto', name: 'Cryptocurrency', unlockYear: btc.startYear, message: 'Cryptocurrency trading unlocked (Bitcoin)', subkey: 'BTC' });
+    }
+    const eth = gameData.crypto.find(c => c.id === 'ETH');
+    if (eth && eth.startYear && eth.endYear >= gameStartYear && eth.startYear <= gameEndYear) {
+      categoryUnlocks.push({ category: 'crypto', name: 'Cryptocurrency', unlockYear: eth.startYear, message: 'New cryptocurrency available (Ethereum)', subkey: 'ETH' });
+    }
+  }
+
+  // REIT (progressive)
+  if (Array.isArray(gameData.reit) && gameData.reit.length > 0) {
+    const embassy = gameData.reit.find(r => r.id === 'EMBASSY');
+    if (embassy && embassy.startYear && embassy.endYear >= gameStartYear && embassy.startYear <= gameEndYear) {
+      categoryUnlocks.push({ category: 'reit', name: 'REIT', unlockYear: embassy.startYear, message: 'REIT investment unlocked (Embassy)', subkey: 'EMBASSY' });
+    }
+    const mindspace = gameData.reit.find(r => r.id === 'MINDSPACE');
+    if (mindspace && mindspace.startYear && mindspace.endYear >= gameStartYear && mindspace.startYear <= gameEndYear) {
+      categoryUnlocks.push({ category: 'reit', name: 'REIT', unlockYear: mindspace.startYear, message: 'New REIT available (Mindspace)', subkey: 'MINDSPACE' });
+    }
+  }
+
+  // Forex
+  if (Array.isArray(gameData.forex) && gameData.forex.length > 0) {
+    const overlap = gameData.forex.filter(f => f.endYear >= gameStartYear && f.startYear <= gameEndYear);
+    if (overlap.length > 0) {
+      const earliestYear = Math.min(...overlap.map(f => f.startYear));
+      categoryUnlocks.push({ category: 'forex', name: 'Forex', unlockYear: earliestYear, message: 'Forex trading unlocked' });
+    }
+  }
+
+  // Sort and build schedule
+  categoryUnlocks.sort((a, b) => a.unlockYear - b.unlockYear);
+  const unlockSchedule = [];
+  for (const info of categoryUnlocks) {
+    let yearOffset = info.unlockYear - gameStartYear;
+    if (yearOffset < 0) yearOffset = 0;
+    const absoluteYear = gameStartYear + yearOffset;
+    if (absoluteYear <= gameEndYear) {
+      unlockSchedule.push({ year: yearOffset, info });
+    }
+  }
+
+  // Place unlocks into events map (avoid collisions by pushing to next free year)
+  for (const u of unlockSchedule) {
+    let y = u.year;
+    while (events[y] && y <= (gameEndYear - gameStartYear)) y++;
+    if (!events[y]) {
+      events[y] = { type: 'unlock', message: u.info.message, unlock: u.info.category, subkey: u.info.subkey };
+    }
+  }
+
+  // Random gain/loss events in remaining years
+  const EVENT_POOL = {
+    losses: [
+      { message: 'Family medical emergency', amount: -30000 },
+      { message: 'Vehicle repair after monsoon', amount: -20000 },
+      { message: 'Unexpected tax liability', amount: -35000 }
+    ],
+    gains: [
+      { message: 'Diwali bonus from company', amount: 50000 },
+      { message: 'Side business profit', amount: 35000 },
+      { message: 'Investment dividend received', amount: 30000 }
+    ]
+  };
+
+  let nextEventMonth = Math.floor(Math.random() * 12) + 24;
+  const totalMonths = (gameEndYear - gameStartYear) * 12;
+  while (nextEventMonth < totalMonths) {
+    const eventYear = Math.floor(nextEventMonth / 12);
+    if (!events[eventYear]) {
+      const isLoss = Math.random() < 0.6;
+      const pool = isLoss ? EVENT_POOL.losses : EVENT_POOL.gains;
+      const ev = pool[Math.floor(Math.random() * pool.length)];
+      events[eventYear] = { type: isLoss ? 'loss' : 'gain', message: ev.message, amount: ev.amount };
+    }
+    nextEventMonth += Math.floor(Math.random() * 13) + 24;
+  }
+
+  return events;
 }
 
 function generateRandomEvents(randomAssets) {
@@ -241,6 +381,7 @@ io.on('connection', (socket) => {
       },
       currentPrices: {},
       gameStartYear: gameData.gameStartYear || 0,
+      gameEndYear: gameData.gameEndYear || (gameData.gameStartYear ? gameData.gameStartYear + 20 : 2025),
       currentMonth: 0,
       status: 'waiting',
       startTime: null,
@@ -250,6 +391,9 @@ io.on('connection', (socket) => {
     });
     
     console.log('📊 Creating player with randomAssets:', gameData.randomAssets);
+    const room = rooms.get(roomCode);
+    const timelineEvents = generateTimelineEventsServer(room.gameData, room.gameStartYear, room.gameEndYear);
+
     const player = {
       id: socket.id,
       name: playerName,
@@ -268,11 +412,9 @@ io.on('connection', (socket) => {
         stocks: {},
         gold: 0
       },
-      yearEvents: generateRandomEvents(gameData.randomAssets)
+      yearEvents: timelineEvents
     };
-    console.log('🎲 Generated events for years 5-7:', player.yearEvents[5], player.yearEvents[6], player.yearEvents[7]);
-    
-    const room = rooms.get(roomCode);
+    console.log('🗓️ Timeline events generated');
     room.players[socket.id] = player;
     
     socket.join(roomCode);
@@ -321,7 +463,7 @@ io.on('connection', (socket) => {
         stocks: {},
         gold: 0
       },
-      yearEvents: generateRandomEvents(room.gameData.randomAssets)
+      yearEvents: generateTimelineEventsServer(room.gameData, room.gameStartYear, room.gameEndYear)
     };
     
     room.players[socket.id] = player;
@@ -410,6 +552,7 @@ io.on('connection', (socket) => {
     io.to(roomCode).emit('game-started', {
       currentPrices: room.currentPrices,
       gameStartYear: room.gameStartYear,
+      gameEndYear: room.gameEndYear,
       availableInvestments: room.availableInvestments,
       leaderboard: getLeaderboard(roomCode),
       mutualFunds: room.gameData.mutualFunds || [],
@@ -901,6 +1044,7 @@ function startMonthTimer(roomCode) {
       currentYear: currentYear,
       monthInYear: monthInYear,
       gameStartYear: room.gameStartYear,
+      gameEndYear: room.gameEndYear,
       currentPrices: room.currentPrices,
       leaderboard: leaderboard,
       availableInvestments: room.availableInvestments
@@ -910,7 +1054,8 @@ function startMonthTimer(roomCode) {
       console.log(`📅 Room ${roomCode} - Year ${currentYear} complete`);
     }
     
-    if (room.currentMonth >= TOTAL_MONTHS) {
+    const totalMonths = (room.gameEndYear - room.gameStartYear) * 12;
+    if (room.currentMonth >= totalMonths) {
       endGame(roomCode);
     }
   }, MONTH_DURATION);
