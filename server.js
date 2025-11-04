@@ -714,7 +714,7 @@ io.on('connection', (socket) => {
     existing.units += units;
     existing.avgPrice = totalCost / existing.units;
     
-    socket.emit('investment-success', { type: 'buy-mutual-fund', mfId, units, pocketCash: player.pocketCash });
+    socket.emit('investment-success', { type: 'buy-mutual-fund', mfId, units: existing.units, avgPrice: existing.avgPrice, pocketCash: player.pocketCash });
     io.to(roomCode).emit('leaderboard-update', { leaderboard: getLeaderboard(roomCode) });
   });
   
@@ -746,7 +746,7 @@ io.on('connection', (socket) => {
       player.portfolio.mutualFunds = player.portfolio.mutualFunds.filter(mf => mf.id !== mfId);
     }
     
-    socket.emit('investment-success', { type: 'sell-mutual-fund', mfId, units, pocketCash: player.pocketCash });
+    socket.emit('investment-success', { type: 'sell-mutual-fund', mfId, units: existing.units, avgPrice: existing.avgPrice, pocketCash: player.pocketCash });
     io.to(roomCode).emit('leaderboard-update', { leaderboard: getLeaderboard(roomCode) });
   });
   
