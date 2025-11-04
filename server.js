@@ -16,13 +16,19 @@ const io = socketIo(server, {
   }
 });
 
+// MULTI: server tick rate (ms per in-game month)
 const MONTH_DURATION = parseInt(process.env.MONTH_DURATION || '5000');
 const TOTAL_MONTHS = 240;
 const STARTING_CAPITAL = 50000;
+// MULTI: stipend amount (server-applied for all players)
+const MONTHLY_STIPEND = parseInt(process.env.MONTHLY_STIPEND || '5000');
+// MULTI: stipend payout cadence in months (server-applied)
+const STIPEND_FREQUENCY_MONTHS = parseInt(process.env.STIPEND_FREQUENCY_MONTHS || '1');
 
 console.log(`⚙️ Game Speed: ${MONTH_DURATION}ms per month (${MONTH_DURATION * 12 / 1000}s per year)`);
 console.log(`🌐 Frontend URL: ${process.env.FRONTEND_URL}`);
 console.log(`🔌 Port: ${process.env.PORT || 3000}`);
+console.log(`💸 Stipend: ₹${MONTHLY_STIPEND} every ${STIPEND_FREQUENCY_MONTHS} month(s)`);
 
 const rooms = new Map();
 
@@ -1057,6 +1063,15 @@ function startMonthTimer(roomCode) {
     if (room.gameData.reit) updatePrices(room.gameData.reit);
     if (room.gameData.forex) updatePrices(room.gameData.forex);
     
+    // Stipend: add configurable amount to each player's pocket cash based on frequency
+    if (STIPEND_FREQUENCY_MONTHS > 0 && room.currentMonth % STIPEND_FREQUENCY_MONTHS === 0) {
+      Object.keys(room.players).forEach(playerId => {
+        const p = room.players[playerId];
+        p.pocketCash = (p.pocketCash || 0) + MONTHLY_STIPEND;
+        io.to(playerId).emit('monthly-stipend', { amount: MONTHLY_STIPEND, pocketCash: p.pocketCash, month: room.currentMonth, frequency: STIPEND_FREQUENCY_MONTHS });
+      });
+    }
+
     // Update gold price
     if (room.gameData.gold && room.gameData.gold.prices && room.gameData.gold.startYear) {
       room.currentPrices.gold = getCurrentPrice(room.gameData.gold, room.gameStartYear, room.currentMonth);
@@ -1151,6 +1166,8 @@ app.get('/health', (req, res) => {
     activeRooms: rooms.size,
     monthDuration: `${MONTH_DURATION}ms`,
     yearDuration: `${MONTH_DURATION * 12 / 1000}s`,
+    stipendAmount: MONTHLY_STIPEND,
+    stipendFrequencyMonths: STIPEND_FREQUENCY_MONTHS,
     totalMonths: TOTAL_MONTHS,
     rooms: Array.from(rooms.values()).map(room => ({
       code: room.code,
