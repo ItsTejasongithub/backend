@@ -906,6 +906,66 @@ io.on('connection', (socket) => {
     socket.emit('investment-success', { type: 'gold', grams, pocketCash: player.pocketCash });
     io.to(roomCode).emit('leaderboard-update', { leaderboard: getLeaderboard(roomCode) });
   });
+
+  // Provide a player's investment breakdown on demand
+  socket.on('get-player-breakdown', (data) => {
+    const roomCode = socket.roomCode;
+    if (!roomCode) return;
+    const room = rooms.get(roomCode);
+    if (!room) return;
+
+    const targetId = data && data.playerId ? data.playerId : socket.id;
+    const player = room.players[targetId];
+    if (!player) return;
+
+    const breakdown = [];
+    // Cash and Savings
+    breakdown.push({ category: 'Cash', value: Math.max(0, Number(player.pocketCash || 0)) });
+    breakdown.push({ category: 'Savings', value: Math.max(0, Number(player.portfolio?.savings || 0)) });
+
+    // Fixed Deposits (server tracks principal only)
+    const fdPrincipal = Array.isArray(player.portfolio?.fixedDeposits)
+      ? player.portfolio.fixedDeposits.reduce((sum, fd) => sum + (Number(fd.amount) || 0), 0)
+      : 0;
+    if (fdPrincipal > 0) breakdown.push({ category: 'Fixed Deposits', value: fdPrincipal });
+
+    // Gold (grams * current price per gram; server price is per 1 unit as set earlier)
+    const goldGrams = Number(player.portfolio?.gold || 0);
+    if (goldGrams > 0) {
+      const goldPrice = Number(room.currentPrices.gold || 0);
+      breakdown.push({ category: 'Gold', value: goldGrams * goldPrice });
+    }
+
+    // Helper to add array-based categories (units * current price)
+    const addArrayCategory = (key, label) => {
+      const arr = Array.isArray(player.portfolio?.[key]) ? player.portfolio[key] : [];
+      if (arr.length === 0) return;
+      const total = arr.reduce((sum, item) => {
+        const units = Number(item.units || 0);
+        const price = Number(room.currentPrices[item.id] || 0);
+        return sum + (units * price);
+      }, 0);
+      if (total > 0) breakdown.push({ category: label, value: total });
+    };
+
+    addArrayCategory('mutualFunds', 'Mutual Funds');
+    addArrayCategory('indexFunds', 'Index Funds');
+    addArrayCategory('commodities', 'Commodities');
+    addArrayCategory('reit', 'REITs');
+    addArrayCategory('crypto', 'Crypto');
+    addArrayCategory('forex', 'Forex');
+
+    // Stocks are stored as object { [id]: { shares, avgPrice } }
+    const stockObj = player.portfolio?.stocks || {};
+    const stockTotal = Object.entries(stockObj).reduce((sum, [stockId, s]) => {
+      const shares = Number(s.shares || 0);
+      const price = Number(room.currentPrices[stockId] || 0);
+      return sum + (shares * price);
+    }, 0);
+    if (stockTotal > 0) breakdown.push({ category: 'Stocks', value: stockTotal });
+
+    socket.emit('player-breakdown', { playerId: targetId, breakdown });
+  });
   
   socket.on('update-networth', (data) => {
     const { netWorth, cash } = data;
